@@ -1,0 +1,175 @@
+import os
+import json
+import sys
+import pandas as pd
+import numpy as np
+from pathlib import Path
+from dotenv import load_dotenv
+from datasets import Dataset
+from ragas import evaluate
+from ragas.metrics import (
+    faithfulness,
+    answer_relevancy,
+    context_precision,
+    context_recall
+)
+from langchain_nvidia_ai_endpoints import ChatNVIDIA, NVIDIAEmbeddings
+
+load_dotenv(override=True)  # .env do projeto prevalece sobre variaveis de ambiente
+
+try:  # garante UTF-8 no stdout mesmo com pipe/redirecionamento no Windows
+    sys.stdout.reconfigure(encoding="utf-8")
+except Exception:
+    pass
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+PRED_FILE = BASE_DIR / "output" / "predictions.json"
+CSV_OUTPUT = BASE_DIR / "output" / "resultado_ragas_metrics.csv"
+
+
+def avaliar_rag_com_julgador_independente():
+    if not PRED_FILE.exists():
+        print(f"❌ Erro: Arquivo {PRED_FILE} não encontrado. Execute o rag_tfidf.py primeiro.")
+        return
+
+    print("1. Carregando previsões geradas pelo RAG...")
+    with open(PRED_FILE, "r", encoding="utf-8") as f:
+        dados_pred = json.load(f)
+
+    ragas_dict = {
+        "question": [],
+        "contexts": [],
+        "answer": [],
+        "ground_truth": []
+    }
+
+    for item in dados_pred:
+        ragas_dict["question"].append(item["question"])
+        ragas_dict["contexts"].append(item["contexts"])
+        ragas_dict["answer"].append(item["answer"])
+        ragas_dict["ground_truth"].append(item.get("ground_truth", ""))
+
+    dataset = Dataset.from_dict(ragas_dict)
+
+    print("2. Inicializando o Julgador em plataforma/arquitetura independente (NVIDIA NIM)...")
+    evaluator_llm = ChatNVIDIA(
+        model="meta/llama-3.2-11b-vision-instruct",
+        temperature=0.0
+    )
+    # NV-Embed-QA foi substituido na API NVIDIA por nvidia/embed-qa-4
+    evaluator_embeddings = NVIDIAEmbeddings(model="nvidia/llama-nemotron-embed-vl-1b-v2")
+
+    print("3. Executando avaliação RAGAS (Faithfulness, Answer Relevancy, Context Precision, Context Recall)...")
+    
+    # Executa a avaliação do RAGAS
+    resultado = evaluate(
+        dataset=dataset,
+        metrics=[
+            faithfulness,
+            answer_relevancy,
+            context_precision,
+            context_recall
+        ],
+        llm=evaluator_llm,
+        embeddings=evaluator_embeddings
+    )
+
+    # Converte os resultados para DataFrame Pandas
+    df_res = resultado.to_pandas()
+    # O RAGAS 0.4 pode retornar apenas as colunas de metricas; reinsere as colunas
+    # originais do dataset para o relatorio e o CSV ficarem completos
+    df_orig = dataset.to_pandas()
+    for col in ("question", "ground_truth", "answer"):
+        if col not in df_res.columns and col in df_orig.columns:
+            df_res[col] = df_orig[col].to_numpy()
+    df_res = df_res.fillna(0.0)  # Trata valores nulos caso alguma metrica falhe pontualmente
+
+    print("\n" + "=" * 80)
+    print(" RELATÓRIO INDIVIDUAL DE QUESTÕES - AVALIAÇÃO RAGAS")
+    print("=" * 80)
+
+    # Listas para acumular as notas globais
+    totais_n1, totais_n2, totais_n3, totais_n4, totais_gerais = [], [], [], [], []
+    
+    # Criar colunas personalizadas para exportação CSV
+    df_res["nota1_faithfulness"] = 0.0
+    df_res["nota2_answer_relevancy"] = 0.0
+    df_res["nota3_context_precision"] = 0.0
+    df_res["nota4_context_recall"] = 0.0
+    df_res["total_nota_questao"] = 0.0
+
+    for idx, row in df_res.iterrows():
+        pergunta = row.get("question", "")
+        gabarito = row.get("ground_truth", "")
+        resposta = row.get("answer", "")
+
+        # Extração das 4 Notas
+        n1 = float(row.get("faithfulness", 0.0))
+        n2 = float(row.get("answer_relevancy", 0.0))
+        n3 = float(row.get("context_precision", 0.0))
+        n4 = float(row.get("context_recall", 0.0))
+        
+        # Média das notas da questão
+        total_questao = (n1 + n2 + n3 + n4) / 4.0
+
+        # Atualiza o DataFrame para exportação
+        df_res.at[idx, "nota1_faithfulness"] = n1
+        df_res.at[idx, "nota2_answer_relevancy"] = n2
+        df_res.at[idx, "nota3_context_precision"] = n3
+        df_res.at[idx, "nota4_context_recall"] = n4
+        df_res.at[idx, "total_nota_questao"] = total_questao
+
+        totais_n1.append(n1)
+        totais_n2.append(n2)
+        totais_n3.append(n3)
+        totais_n4.append(n4)
+        totais_gerais.append(total_questao)
+
+        # Exibição individual no terminal conforme solicitado
+        print(f"\n[Questão {idx + 1}/{len(df_res)}]")
+        print(f"❓ PERGUNTA: {pergunta}")
+        print(f"📘 RESPOSTA DO GROUND_TRUTH: {gabarito}")
+        print(f"🤖 RESPOSTA ENCONTRADA: {resposta}")
+        print("-" * 80)
+        print(f"   NOTAS RAGAS:")
+        print(f"   • Nota 1 (Faithfulness):        {n1:.4f}")
+        print(f"   • Nota 2 (Answer Relevancy):    {n2:.4f}")
+        print(f"   • Nota 3 (Context Precision):   {n3:.4f}")
+        print(f"   • Nota 4 (Context Recall):      {n4:.4f}")
+        print(f"   👉 TOTAL DE NOTA QUESTAO:       {total_questao:.4f}")
+        print("=" * 80)
+
+    # Cálculo dos Totais Finais do Benchmark
+    nota_total_1 = float(np.mean(totais_n1)) if totais_n1 else 0.0
+    nota_total_2 = float(np.mean(totais_n2)) if totais_n2 else 0.0
+    nota_total_3 = float(np.mean(totais_n3)) if totais_n3 else 0.0
+    nota_total_4 = float(np.mean(totais_n4)) if totais_n4 else 0.0
+    avaliacao_geral = float(np.mean(totais_gerais)) if totais_gerais else 0.0
+
+    print("\n" + "#" * 80)
+    print(" RESUMO FINAL DAS NOTAS DO BENCHMARK RAGAS")
+    print("#" * 80)
+    print(f"📊 Nota Total 1 (Faithfulness Médio):        {nota_total_1:.4f}")
+    print(f"📊 Nota Total 2 (Answer Relevancy Médio):    {nota_total_2:.4f}")
+    print(f"📊 Nota Total 3 (Context Precision Médio):   {nota_total_3:.4f}")
+    print(f"📊 Nota Total 4 (Context Recall Médio):      {nota_total_4:.4f}")
+    print("-" * 80)
+    print(f"🏆 AVALIAÇÃO GERAL FINAL DO RAGAS:           {avaliacao_geral:.4f} / 1.0000")
+    print("#" * 80 + "\n")
+
+    # Organizar colunas do CSV para facilidade de leitura e auditoria
+    colunas_finais = [
+        "question", "ground_truth", "answer",
+        "nota1_faithfulness", "nota2_answer_relevancy",
+        "nota3_context_precision", "nota4_context_recall",
+        "total_nota_questao"
+    ]
+    df_csv = df_res[[c for c in colunas_finais if c in df_res.columns]]
+
+    # Salva em CSV
+    df_csv.to_csv(CSV_OUTPUT, index=False, encoding="utf-8-sig")
+    print(f"💾 Relatório CSV atualizado e salvo em: {CSV_OUTPUT}")
+
+
+if __name__ == "__main__":
+    avaliar_rag_com_julgador_independente()

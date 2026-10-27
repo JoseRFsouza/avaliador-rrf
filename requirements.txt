@@ -1,0 +1,34 @@
+# Instale no venv do projeto: .\.venv\Scripts\activate && pip install -r requirements.txt
+# (crie o venv UMA vez, com o nome .venv, e nao crie outros)
+
+# ---- Recuperacao densa (FAISS) ----
+faiss-cpu
+numpy
+
+# ---- Corpus / LLM (mesmos modelos e versoes do projeto TF-IDF) ----
+langchain
+langchain-community==0.4.1
+langchain-nvidia-ai-endpoints==1.5.0
+langchain-openai
+scikit-learn
+pypdf
+datasets
+pandas
+python-dotenv
+requests
+
+# ---- Avaliacao RAGAS (juiz independente) ----
+# NOTA: o ragas depende de scikit-network, que nao tem wheel para Python 3.14 e
+# exige MSVC para compilar. Ele so eh usado na geracao de testset por grafos, nao
+# nas metricas. Se a instalacao falhar, use: pip install --no-deps ragas==0.4.3
+ragas==0.4.3
+appdirs
+diskcache
+instructor
+nest-asyncio
+networkx
+pillow
+rich
+tiktoken
+tqdm
+typer
